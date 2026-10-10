@@ -46,7 +46,7 @@ export class Track {
 
     host.innerHTML = `
       <div class="track-wrap">
-        <div class="track-hud"><span class="tm" data-loop>Lap 1</span><span class="tm" data-next>Next CP 1</span></div>
+        <div class="track-hud"><span class="tm" data-loop>0/6 CP</span><span class="tm" data-next>Next CP 1</span></div>
         <div class="track-lights" data-lights hidden><i></i><i></i><i></i></div>
         <div class="fx" data-fx></div>
       </div>`;
@@ -145,9 +145,9 @@ export class Track {
   /** New snapshot for this side. Detects events and fires effects. */
   update(state) {
     const m = state.match;
-    const n = state.settings.trackCheckpoints;
-    if (n !== this.n) { this.n = n; this.drawGates(); this.drawItems(); }
     if (!m) { this.prev = null; return; }
+    const n = m.checkpoints;
+    if (n !== this.n) { this.n = n; this.drawGates(); this.drawItems(); }
     const w = m.sides[this.side].watch;
     this.state = state;
     this.w = w;
@@ -166,17 +166,24 @@ export class Track {
         const k = w.laps.length;
         const split = w.laps[k - 1];
         const isBest = k > 1 && split <= Math.min(...w.laps.slice(0, -1));
-        const word = k % this.n === 0 ? 'LAP!' : CP_WORDS[this.wordIdx++ % CP_WORDS.length];
-        this.sfx(word, `CP ${k} · ${fmtLap(split)}${isBest ? ' ★' : ''}`, 'slam');
+        if (w.status === 'complete') {
+          this.sfx('FINISH!', `${fmtLap(w.laps.reduce((x, y) => x + y, 0))}`, 'stay', 'var(--zi-success)');
+        } else {
+          this.sfx(CP_WORDS[this.wordIdx++ % CP_WORDS.length], `CP ${k} · ${fmtLap(split)}${isBest ? ' ★' : ''}`, 'slam');
+        }
         const gate = this.gates[k % this.n];
         gate.classList.remove('cp-reached');
         void gate.getBoundingClientRect();
         gate.classList.add('cp-reached');
+      } else if (w.laps.length < prev.laps.length) {
+        // an undone checkpoint: drop whatever was celebrating it
+        this.clearFx();
+        if (w.status === 'paused') this.sfx('PIT STOP', 'Paused', 'stay', 'var(--zi-warning)');
       } else if (w.status === 'running' && prev.status === 'idle') {
         this.sfx('GO!', null, 'slam', 'var(--zi-success)');
       } else if (w.status === 'paused' && prev.status === 'running') {
         this.sfx('PIT STOP', 'Paused', 'stay', 'var(--zi-warning)');
-      } else if (w.status === 'running' && prev.status === 'paused') {
+      } else if (w.status === 'running' && prev.status !== 'running') {
         this.clearFx();
         this.sfx('BACK ON!', null, 'slam', 'var(--zi-success)');
       }
@@ -186,6 +193,8 @@ export class Track {
       }
     } else if (w.status === 'paused') {
       this.sfx('PIT STOP', 'Paused', 'stay', 'var(--zi-warning)');
+    } else if (w.status === 'complete') {
+      this.sfx('FINISH!', fmtLap(w.laps.reduce((x, y) => x + y, 0)), 'stay', 'var(--zi-success)');
     } else if (w.status === 'done') {
       this.sfx('TIME!', `${w.laps.length} CP`, 'stay');
     }
@@ -193,11 +202,11 @@ export class Track {
 
     this.lights.hidden = !(w.status === 'idle' && !state.clock.over);
     const k = w.laps.length;
-    this.hudLoop.textContent = `Lap ${Math.floor(k / this.n) + 1}`;
-    this.hudNext.textContent = w.status === 'done' ? `${k} CP total` : `Next CP ${k + 1}`;
-    const r = k % this.n; // checkpoints reached on the current lap of the track
+    this.hudLoop.textContent = `${k}/${this.n} CP`;
+    this.hudNext.textContent = k >= this.n ? 'Finished' : w.status === 'done' ? 'Time up' : `Next CP ${k + 1}`;
     this.gates.forEach((g, i) => {
-      const reached = k > 0 && (r === 0 || (i >= 1 && i <= r));
+      // gate 0 is the finish line, i.e. the last checkpoint
+      const reached = i === 0 ? k >= this.n : i <= k;
       g.querySelector('circle').setAttribute('fill', reached ? '#FFC83D' : '#FFF6E8');
     });
   }
@@ -218,8 +227,9 @@ export class Track {
     const w = this.w;
     if (!w) return 0;
     const seg = this.L / this.n;
-    const k = w.laps.length;
+    const k = Math.min(w.laps.length, this.n);
     if (w.status === 'idle') return 0;
+    if (w.status === 'complete' || k >= this.n) return this.L;
     const lap = lapElapsed(w, capT(this.state, serverNow()));
     const avg = k ? w.laps.reduce((a, b) => a + b, 0) / k : 20000;
     const frac = 0.9 * (1 - Math.exp(-lap / (avg * 0.6)));

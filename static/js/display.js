@@ -1,8 +1,9 @@
 // Audience display: read-only, projector friendly.
-import { connect, esc, ROUND_NAMES } from './core.js';
+import { connect, esc, tickIfDue } from './core.js';
 import {
-  SIDES, burstSVG, frameHeader, frameTeams, headerHTML, renderRosterReadOnly, rosterHTML, updateHeader, updateTeams, versusHTML,
+  SIDES, frameHeader, frameTeams, headerHTML, renderRosterReadOnly, rosterHTML, updateHeader, updateTeams, versusHTML, viewOf,
 } from './view.js';
+import { mountBracket } from './bracket.js';
 import { Track } from './track.js';
 
 const trackSlot = (side) => `<div class="panel track-panel" data-track="${side}"></div>`;
@@ -11,61 +12,61 @@ document.getElementById('app').innerHTML = `
   <div class="stage">
     ${rosterHTML({ collapsible: false })}
     <main class="arena">
-      ${headerHTML()}
-      ${versusHTML(trackSlot('A'), trackSlot('B'))}
-      <section class="panel splash" id="splash" hidden></section>
+      ${headerHTML('<span class="tm cp-chip" id="cp-chip" hidden></span>')}
+      <div class="body-slot">
+        ${versusHTML(trackSlot('A'), trackSlot('B'))}
+        <section class="panel bracket-panel" id="bracket" hidden>
+          <div class="champ-banner" id="champ-banner" hidden></div>
+          <div class="bracket-wrap" id="bracket-wrap"></div>
+        </section>
+        <section class="panel splash" id="splash" hidden>
+          <h2>Bracket<br>coming up</h2>
+          <p>Seeds are being locked in. Bots to the pit lane.</p>
+        </section>
+      </div>
     </main>
   </div>`;
 
+const bracket = mountBracket(document.getElementById('bracket-wrap'));
 const tracks = Object.fromEntries(SIDES.map((s) => [s, new Track(document.querySelector(`[data-track="${s}"]`), s)]));
-const versus = document.getElementById('versus');
-const splash = document.getElementById('splash');
 let state = null;
-let splashKey = '';
+let confettiFor = null;
 
 function render(next) {
   state = next;
+  const view = viewOf(state);
   renderRosterReadOnly(document.getElementById('roster-list'), state);
   updateHeader(state);
-  versus.hidden = !state.match;
-  splash.hidden = !!state.match;
-  if (state.match) {
-    updateTeams(state);
-  } else {
-    renderSplash();
-  }
-  for (const t of Object.values(tracks)) t.update(state);
+  document.getElementById('versus').hidden = view !== 'match';
+  document.getElementById('bracket').hidden = view !== 'bracket';
+  document.getElementById('splash').hidden = view !== 'setup';
+  const chip = document.getElementById('cp-chip');
+  chip.hidden = view !== 'match';
+  if (state.match) chip.textContent = `${state.match.checkpoints} checkpoints`;
+  if (view === 'match') updateTeams(state);
+  if (view === 'bracket') renderBracket();
+  else bracket.reset();
+  // Tracks measure their SVG path, so only touch them while they're on screen.
+  if (view === 'match') for (const t of Object.values(tracks)) t.update(state);
 }
 
-function renderSplash() {
-  const last = state.results[0];
-  const champion = last && last.round === 2 && last.winner;
-  const key = champion ? `champ:${last.id}` : `wait:${last?.id ?? 0}`;
-  if (key === splashKey) return;
-  splashKey = key;
-  if (champion) {
-    splash.innerHTML = `
-      <div class="trophy" aria-hidden="true">🏆</div>
-      <h2>Champion!</h2>
-      <div class="cbox-wrap"><div class="cbox cbox-gold champion-name">${esc(last.winner)}</div></div>
-      <p>Winner of the ZipIt line follower final against ${esc(last.winner === last.teamA ? last.teamB : last.teamA)}</p>`;
-    confetti();
-    return;
+function renderBracket() {
+  const champ = state.tournament.champion;
+  const banner = document.getElementById('champ-banner');
+  banner.hidden = champ == null;
+  if (champ != null) {
+    const team = state.teams.find((t) => t.id === champ);
+    banner.innerHTML = `<span class="champ-word">Champion!</span><span class="cbox-wrap"><span class="cbox cbox-gold champ-name">${esc(team?.name)}</span></span>`;
+    if (confettiFor !== champ) { confettiFor = champ; confetti(); }
   }
-  const recent = state.results.slice(0, 4).filter((r) => r.winner).map((r) =>
-    `<span class="chip">${esc(ROUND_NAMES[r.round][0])} · <b style="color:var(--zi-gold)">${esc(r.winner)}</b> beat ${esc(r.winner === r.teamA ? r.teamB : r.teamA)}</span>`).join('');
-  splash.innerHTML = `
-    <div class="vs-badge" style="width:120px" aria-hidden="true">${burstSVG()}<span>!</span></div>
-    <h2>Next match<br>coming up</h2>
-    <p>Bots to the start line. The clock starts with the first run.</p>
-    ${recent ? `<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">${recent}</div>` : ''}`;
+  bracket.update(state); // after the banner, so it measures the space that's left
 }
 
 function confetti() {
   const box = document.createElement('div');
   box.className = 'confetti';
   const colors = ['#FFC83D', '#E01E37', '#FFF6E8', '#7CFFB2'];
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < 140; i++) {
     const p = document.createElement('i');
     p.style.left = `${Math.random() * 100}vw`;
     p.style.background = colors[i % colors.length];
@@ -78,9 +79,10 @@ function confetti() {
 }
 
 function loop(now) {
-  if (state) {
+  if (state && viewOf(state) === 'match') {
     frameHeader(state);
     frameTeams(state);
+    tickIfDue(state);
     for (const t of Object.values(tracks)) t.frame(now);
   }
   requestAnimationFrame(loop);

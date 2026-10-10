@@ -1,6 +1,6 @@
 // Board layout shared by the audience display and the admin console.
 import {
-  ROUND_NAMES, capT, clockElapsed, clockRemaining, esc, fmtCountdown, fmtLap, fmtScore, lapElapsed, serverNow, sum, teamById,
+  capT, clockRemaining, esc, fmtCountdown, fmtHead, fmtLap, fmtSigned, lapElapsed, roundName, serverNow, sum, teamById,
 } from './core.js';
 
 export const SIDES = ['A', 'B'];
@@ -20,6 +20,14 @@ export function burstSVG(fill = 'var(--zi-red)') {
   return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon points="${BURST}" fill="${fill}" stroke="var(--zi-ink)" stroke-width="3" stroke-linejoin="round"/></svg>`;
 }
 
+/** Which body the board shows: the live match, the bracket tree, or the pre-tournament setup. */
+export function viewOf(state) {
+  const t = state.tournament;
+  if (t.size == null) return 'setup';
+  if (t.view === 'match' && state.match) return 'match';
+  return 'bracket';
+}
+
 export function rosterHTML({ collapsible }) {
   return `
     <aside class="roster panel" aria-label="Teams">
@@ -28,7 +36,7 @@ export function rosterHTML({ collapsible }) {
         ${collapsible ? '<button class="collapse-btn" id="collapse" type="button" aria-label="Collapse team list" title="Collapse team list">«</button>' : ''}
       </div>
       <span class="roster-vertical" aria-hidden="true">TEAMS</span>
-      <div class="roster-cols"><span class="tm">Team name</span><span class="tm">Headstart</span></div>
+      <div class="roster-cols"><span class="tm">Seed · team</span><span class="tm">Headstart</span></div>
       <ol class="roster-list" id="roster-list"></ol>
       <div id="roster-extra"></div>
     </aside>`;
@@ -37,7 +45,7 @@ export function rosterHTML({ collapsible }) {
 export function teamColHTML(side, middle) {
   return `
     <div class="team-col" data-side="${side}">
-      <div class="team-name cbox-wrap"><div class="cbox"><h2><span class="side-tag">${side}</span><span data-name>—</span></h2></div></div>
+      <div class="team-name cbox-wrap"><div class="cbox"><h2><span class="side-tag">${side}</span><span data-name>—</span></h2><span class="hs-chip" data-hs></span></div></div>
       <div class="attempt panel">
         <div class="attempt-top">
           <span class="tm" data-attempt>Attempt 1</span>
@@ -56,12 +64,12 @@ export function teamColHTML(side, middle) {
       <div class="cbox-wrap"><div class="cbox overall">
         <div class="overall-title">Overall</div>
         <div class="overall-row"><span class="k">Attempt number</span><span class="v" data-attempt-no>1</span></div>
-        <div class="overall-row"><span class="k">Best attempt</span><span class="v" data-best>—</span></div>
+        <div class="overall-row"><span class="k">Best score <small>time − headstart</small></span><span class="v" data-best>—</span></div>
       </div></div>
     </div>`;
 }
 
-export function headerHTML(extra = '') {
+export function headerHTML(tools = '') {
   return `
     <header class="scoreboard-head">
       <div class="round-title cbox-wrap"><div class="cbox cbox-gold"><h1 id="round-name">ZipIt Finals</h1><span class="round-sub" id="round-sub">Line follower showdown</span></div></div>
@@ -70,7 +78,7 @@ export function headerHTML(extra = '') {
         <div class="countdown-digits" id="countdown-digits" role="timer" aria-live="off">10:00</div>
         <div class="countdown-bar"><i id="countdown-bar"></i></div>
       </div>
-      ${extra}
+      ${tools}
     </header>`;
 }
 
@@ -85,26 +93,45 @@ export function versusHTML(middleA, middleB) {
 
 // ---------- roster ----------
 
-export function renderRosterReadOnly(list, state) {
+export function rosterRowClass(state, t) {
   const sides = state.match?.sides;
+  if (t.eliminated || t.unseeded) return 'out';
+  if (sides?.A.teamId === t.id) return 'in-match-a';
+  if (sides?.B.teamId === t.id) return 'in-match-b';
+  return '';
+}
+
+export function outTag(t) {
+  if (t.unseeded) return '<span class="out-tag">NOT IN BRACKET</span>';
+  if (t.eliminated) return `<span class="out-tag">OUT · ${esc(roundName(t.eliminatedRound)[0])}</span>`;
+  return '';
+}
+
+export function renderRosterReadOnly(list, state) {
   if (!state.teams.length) {
     list.innerHTML = '<li class="roster-empty">No teams yet.</li>';
     return;
   }
-  list.innerHTML = state.teams.map((t, i) => {
-    const cls = t.eliminated ? 'out' : sides?.A.teamId === t.id ? 'in-match-a' : sides?.B.teamId === t.id ? 'in-match-b' : '';
-    const outTag = t.eliminated ? `<span class="out-tag">OUT${t.eliminatedRound ? ` · R${t.eliminatedRound}` : ''}</span>` : '';
-    return `<li class="team-row ${cls}"><span class="seed">${i + 1}</span><span class="tname" title="${esc(t.name)}">${esc(t.name)}</span><span class="thead">${esc(t.headstart || '—')}</span>${outTag}</li>`;
-  }).join('');
+  list.innerHTML = state.teams.map((t) => `
+    <li class="team-row ${rosterRowClass(state, t)}"><span class="seed">${t.seed}</span><span class="tname" title="${esc(t.name)}">${esc(t.name)}</span><span class="thead">${fmtHead(t.headstart)}</span>${outTag(t)}</li>`).join('');
 }
 
 // ---------- header ----------
 
 export function updateHeader(state) {
-  const [name, sub] = ROUND_NAMES[state.match?.round] ?? ['ZipIt Finals', 'Line follower showdown'];
-  document.getElementById('round-name').textContent = name;
-  document.getElementById('round-sub').textContent = sub;
-  document.getElementById('countdown').hidden = !state.match;
+  const view = viewOf(state);
+  const t = state.tournament;
+  let title = ['ZipIt Finals', 'Line follower showdown'];
+  if (view === 'match') {
+    title = [roundName(state.match.round)[0], `${roundName(state.match.round)[1]} · Match ${state.match.matchNo} of ${state.match.matchCount}`];
+  } else if (view === 'bracket') {
+    const champ = t.champion != null;
+    title = champ ? ['Champions', 'ZipIt Finals'] : [roundName(t.round)[0], t.roundOver ? 'Round complete' : t.roundStarted ? 'Bracket' : 'Up next'];
+  }
+  document.getElementById('round-name').textContent = title[0];
+  document.getElementById('round-sub').textContent = title[1];
+  document.getElementById('countdown').hidden = view !== 'match';
+  document.body.dataset.view = view;
 }
 
 function clockPhase(state) {
@@ -117,24 +144,23 @@ function clockPhase(state) {
 
 let lastPhase = '';
 export function frameHeader(state) {
+  if (!state.match) return;
   const el = document.getElementById('countdown');
-  const remaining = state.match ? clockRemaining(state.clock) : state.clock.durationMs;
+  const remaining = clockRemaining(state.clock);
   document.getElementById('countdown-digits').textContent = fmtCountdown(remaining);
   document.getElementById('countdown-bar').style.transform = `scaleX(${remaining / state.clock.durationMs})`;
-  const phase = state.match ? clockPhase(state) : 'idle';
+  const phase = clockPhase(state);
   el.classList.toggle('is-low', phase === 'live' && remaining < 60000);
   el.classList.toggle('is-final', phase === 'live' && remaining < 10000);
   el.classList.toggle('is-over', phase === 'over');
   if (phase !== lastPhase) {
     lastPhase = phase;
-    const label = {
-      idle: '<span class="tm tm-dim">Waiting for match</span>',
+    document.getElementById('countdown-label').innerHTML = {
       ready: `<span class="tm">Match clock · ${fmtCountdown(state.clock.durationMs)}</span>`,
       live: '<span class="tm tm-live"><i class="dot dot-pulse"></i>Live</span>',
       paused: '<span class="tm tm-warn">Clock paused</span>',
       over: '<span class="tm tm-red">Time!</span>',
     }[phase];
-    document.getElementById('countdown-label').innerHTML = label;
   }
 }
 
@@ -144,45 +170,54 @@ const STATUS = {
   idle: ['Ready', 'tm-dim'],
   running: ['<i class="dot dot-pulse"></i>Running', 'tm-live'],
   paused: ['Paused', 'tm-warn'],
-  done: ['Finished', 'tm-red'],
+  complete: ['Finished run', 'tm-live'],
+  done: ['Time up', 'tm-red'],
 };
 
 const lapKeys = {};
 
-export function updateTeams(state) {
+/** Big score with its working: "01:00.30" over "6/6 CP · 01:12.30 − 12s". */
+export function scoreHTML(best, checkpoints, headstart) {
+  if (!best) return '—';
+  return `${fmtSigned(best.scoreMs)} <small>${best.checkpoints}/${checkpoints} CP · ${fmtLap(best.timeMs)} − ${fmtHead(headstart)}</small>`;
+}
+
+export function updateTeams(state, { editable = false } = {}) {
   if (!state.match) return;
+  const n = state.match.checkpoints;
   for (const side of SIDES) {
     const col = document.querySelector(`.team-col[data-side="${side}"]`);
     const s = state.match.sides[side];
     const w = s.watch;
     const team = teamById(state, s.teamId);
     col.querySelector('[data-name]').textContent = team?.name ?? '—';
+    col.querySelector('[data-hs]').textContent = `Headstart ${fmtHead(team?.headstart ?? 0)}`;
     col.querySelector('[data-attempt]').textContent = `Attempt ${w.attemptNo}`;
-    col.querySelector('[data-cps]').textContent = `${w.laps.length} CP`;
+    col.querySelector('[data-cps]').textContent = `${w.laps.length}/${n} CP`;
     const [label, cls] = STATUS[w.status];
     const st = col.querySelector('[data-status]');
     st.className = `tm ${cls}`;
     st.innerHTML = label;
     col.querySelector('[data-lap-label]').textContent = {
       idle: state.clock.over ? 'Time is up' : 'Ready to start',
-      running: `Checkpoint ${w.laps.length + 1} · current lap`,
-      paused: `Checkpoint ${w.laps.length + 1} · paused`,
+      running: `Checkpoint ${w.laps.length + 1} of ${n} · current lap`,
+      paused: `Checkpoint ${w.laps.length + 1} of ${n} · paused`,
+      complete: `All ${n} checkpoints · run complete`,
       done: 'Time is up · attempt saved',
     }[w.status];
     const digits = col.querySelector('[data-lap]');
     digits.classList.toggle('running', w.status === 'running');
     digits.classList.toggle('paused', w.status === 'paused');
+    digits.classList.toggle('complete', w.status === 'complete');
     col.querySelector('[data-attempt-no]').textContent = String(w.status === 'done' ? s.attempts.length : w.attemptNo);
-    const best = col.querySelector('[data-best]');
-    best.innerHTML = s.best ? `${s.best.checkpoints} CP <small>· ${fmtLap(s.best.scoreMs)}</small>` : '—';
-    best.title = fmtScore(s.best);
-    renderLaps(col.querySelector('[data-laps]'), side, state.match.id, w);
+    col.querySelector('[data-best]').innerHTML = scoreHTML(s.best, n, team?.headstart ?? 0);
+    renderLaps(col.querySelector('[data-laps]'), side, state.match.id, w, editable);
   }
 }
 
-function renderLaps(list, side, matchId, w) {
+function renderLaps(list, side, matchId, w, editable) {
   const attempt = `${matchId}:${w.attemptNo}`;
-  const key = `${attempt}:${w.laps.join(',')}`;
+  const key = `${attempt}:${w.laps.join(',')}:${editable && w.status}`;
   const prev = lapKeys[side];
   if (prev?.key === key) return;
   lapKeys[side] = { key, attempt, count: w.laps.length };
@@ -193,11 +228,13 @@ function renderLaps(list, side, matchId, w) {
   }
   const min = Math.min(...w.laps);
   const max = Math.max(...w.laps);
+  const canEdit = editable && ['running', 'paused', 'complete'].includes(w.status);
   let cum = 0;
   const rows = w.laps.map((ms, i) => {
     cum += ms;
     const mark = w.laps.length >= 3 ? (ms === min ? 'best' : ms === max ? 'worst' : '') : '';
-    return `<li class="${mark}"><span class="cp">CP ${i + 1}</span><span class="cum">${fmtLap(cum)}</span><span class="split">${fmtLap(ms)}</span></li>`;
+    const attrs = canEdit ? ` data-edit-live="${side}" tabindex="0" role="button" title="Click to edit the splits"` : '';
+    return `<li class="${mark}${canEdit ? ' editable' : ''}"${attrs}><span class="cp">CP ${i + 1}</span><span class="cum">${fmtLap(cum)}</span><span class="split">${fmtLap(ms)}</span></li>`;
   });
   rows.reverse();
   if (grew) rows[0] = rows[0].replace('<li class="', '<li class="new ');
@@ -212,10 +249,8 @@ export function frameTeams(state) {
   for (const side of SIDES) {
     const col = document.querySelector(`.team-col[data-side="${side}"]`);
     const w = state.match.sides[side].watch;
-    const lap = lapElapsed(w, t);
+    const lap = w.status === 'complete' ? sum(w.laps) : lapElapsed(w, t);
     col.querySelector('[data-lap]').textContent = fmtLap(lap);
-    col.querySelector('[data-total]').textContent = fmtLap(sum(w.laps) + lap);
+    col.querySelector('[data-total]').textContent = fmtLap(sum(w.laps) + (w.status === 'complete' ? 0 : lap));
   }
 }
-
-export { clockElapsed };

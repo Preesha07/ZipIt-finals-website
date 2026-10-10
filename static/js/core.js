@@ -1,4 +1,10 @@
-// Live state from the server + clock math shared by the display and admin pages.
+// Live state from Supabase + clock math shared by the display and admin pages.
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.4/+esm';
+import { SUPABASE_KEY, SUPABASE_URL } from './config.js';
+
+export const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
 
 const offsets = [];
 let offset = 0;
@@ -12,35 +18,65 @@ export function syncClock(serverNow) {
 
 export const serverNow = () => Date.now() + offset;
 
+/**
+ * Keep onState fed with snapshots. Realtime announces every version bump of app_state;
+ * a cheap version poll every few seconds covers a dropped socket or a sleeping laptop.
+ */
 export function connect(onState, onStatus) {
-  let es;
   let lastVersion = -1;
-  const open = () => {
-    es = new EventSource('/api/events');
-    es.onopen = () => onStatus(true);
-    es.onmessage = (e) => {
-      const state = JSON.parse(e.data);
-      syncClock(state.serverNow);
-      if (state.version === lastVersion) return;
-      lastVersion = state.version;
-      onState(state);
-    };
-    es.onerror = () => {
+  let inflight = false;
+  let again = false;
+
+  const deliver = (state) => {
+    if (!state) return;
+    syncClock(state.serverNow);
+    if (state.version <= lastVersion) return;
+    lastVersion = state.version;
+    onState(state);
+  };
+
+  async function refresh() {
+    if (inflight) { again = true; return; }
+    inflight = true;
+    try {
+      const { data, error } = await sb.rpc('zipit_snapshot');
+      if (error) throw error;
+      deliver(data);
+      onStatus(true);
+    } catch {
       onStatus(false);
-      // EventSource retries on its own; recreate only if the browser gave up.
-      if (es.readyState === EventSource.CLOSED) setTimeout(open, 1500);
-    };
-  };
-  open();
-  return {
-    /** Feed a snapshot that arrived another way (e.g. an action response). */
-    push(state) {
-      syncClock(state.serverNow);
-      if (state.version <= lastVersion) return;
-      lastVersion = state.version;
-      onState(state);
-    },
-  };
+    } finally {
+      inflight = false;
+      if (again) { again = false; refresh(); }
+    }
+  }
+
+  sb.channel('zipit-state')
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_state' }, (p) => {
+      if (p.new?.version !== lastVersion) refresh();
+    })
+    .subscribe((status) => { if (status === 'SUBSCRIBED') refresh(); });
+
+  setInterval(async () => {
+    const { data, error } = await sb.from('app_state').select('version').eq('id', 1).single();
+    if (error) { onStatus(false); return; }
+    onStatus(true);
+    if (data.version !== lastVersion) refresh();
+  }, 4000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  refresh();
+
+  return { push: deliver, refresh };
+}
+
+let lastTick = 0;
+/** Nobody runs a server loop any more: whichever page sees the clock reach zero asks the database to apply the stop. */
+export function tickIfDue(state) {
+  const c = state.clock;
+  if (!state.match || c.over || c.since == null || clockRemaining(c) > 0) return;
+  if (Date.now() - lastTick < 1500) return;
+  lastTick = Date.now();
+  sb.rpc('zipit_tick').then(() => {}, () => {});
 }
 
 // ---------- time math ----------
@@ -88,16 +124,34 @@ export function fmtCountdown(ms) {
   return `${pad(Math.floor(total / 60))}:${pad(total % 60)}`;
 }
 
-export const ROUND_NAMES = {
-  16: ['Round of 16', 'Knockouts'],
-  8: ['Round of 8', 'Quarter-finals'],
-  4: ['Round of 4', 'Semi-finals'],
-  2: ['The Final', 'Round of 2'],
-};
+/** [title, subtitle] for a round, keyed by its bracket size. */
+export function roundName(size) {
+  if (size === 2) return ['The Final', 'Round of 2'];
+  if (size === 4) return ['Semi-finals', 'Round of 4'];
+  if (size === 8) return ['Quarter-finals', 'Round of 8'];
+  return [`Round of ${size}`, 'Knockouts'];
+}
 
-export function fmtScore(best) {
+/** Score time can dip below zero once the headstart is taken off. */
+export function fmtSigned(ms) {
+  return ms < 0 ? `−${fmtLap(-ms)}` : fmtLap(ms);
+}
+
+export function fmtHead(seconds) {
+  return seconds ? `${+seconds.toFixed(2)}s` : '0s';
+}
+
+/** Score of an attempt: "6/6 CP · 01:00.30". */
+export function fmtScore(best, checkpoints) {
   if (!best) return '—';
-  return `${best.checkpoints} CP · ${fmtLap(best.scoreMs)}`;
+  return `${best.checkpoints}/${checkpoints} CP · ${fmtSigned(best.scoreMs)}`;
+}
+
+/** Parse "mm:ss.cc", "m:ss", "ss.cc" or "ss" into ms. NaN when it doesn't look like a time. */
+export function parseTime(str) {
+  const m = String(str).trim().match(/^(?:(\d+):)?(\d+(?:\.\d*)?)$/);
+  if (!m) return NaN;
+  return Math.round(((Number(m[1] || 0) * 60) + Number(m[2])) * 1000);
 }
 
 export function esc(s) {
