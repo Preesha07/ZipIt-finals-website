@@ -699,6 +699,7 @@ begin
   end if;
 
   return jsonb_build_object(
+    'schema', 2,                       -- bump when this file changes, so a deploy can be checked from outside
     'version', s.version,
     'serverNow', private.now_ms(),
     'settings', jsonb_build_object('matchDurationMs', s.duration_ms, 'defaultCheckpoints', s.default_checkpoints),
