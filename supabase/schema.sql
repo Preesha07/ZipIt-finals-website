@@ -5,6 +5,8 @@
 --     select private.set_admin_password('pick-a-long-passphrase');
 -- Running the file again is safe: it drops and recreates everything (all data is lost).
 --
+-- Every UPDATE/DELETE has a WHERE clause: Supabase's pg_safeupdate rejects ones without.
+--
 -- Model: everyone can read the tables (the audience page needs them). Nobody can write
 -- them directly. Every change goes through public.zipit_action(password, action), a
 -- security-definer function that checks the shared admin password, applies the same
@@ -208,7 +210,7 @@ end $$;
 
 create function private.reset_live(p_match bigint) returns void language sql as $$
   update public.app_state set match_id = p_match, clock_accum = 0, clock_since = null, clock_over = false where id = 1;
-  update public.live_watches set status = 'idle', laps = '[]', accum = 0, since = null, attempt_no = 1, last_t = 0;
+  update public.live_watches set status = 'idle', laps = '[]', accum = 0, since = null, attempt_no = 1, last_t = 0 where side in ('A', 'B');
 $$;
 
 create function private.save_attempt(p_side text, p_reason text, p_t bigint) returns boolean
@@ -236,7 +238,7 @@ begin
   for sd in select side from public.live_watches where status in ('running', 'paused', 'complete') order by side loop
     perform private.save_attempt(sd, 'timeout', e);
   end loop;
-  update public.live_watches set status = 'done';
+  update public.live_watches set status = 'done' where side in ('A', 'B');
   update public.app_state set clock_accum = duration_ms, clock_since = null, clock_over = true where id = 1;
   return true;
 end $$;
@@ -450,8 +452,8 @@ begin
 
   when 'tournament.reset' then
     perform private.reset_live(null);
-    delete from public.attempts;
-    delete from public.matches;
+    delete from public.attempts where id is not null;
+    delete from public.matches where id is not null;
     update public.app_state set t_size = null, t_round = null, t_view = 'setup', t_champion = null where id = 1;
 
   when 'round.proceed' then
